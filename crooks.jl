@@ -5,7 +5,7 @@ using GLMakie, LinearAlgebra, ProgressMeter, Distributions
 #
 # > A single particle occupies [one of 32 possible] positions in a one-dimensional
 # > box with periodic boundaries, and is coupled to a heat bath of
-# > temperature $T = 5$. The energy surface, $E(x)$, is [given by $\operatorname{abs}(x - (x_0 + 1/2))$, with $x_0$ some particular site].
+# > temperature $T = 5$. The energy surface, $E(x)$, is [given by $\lvert x - (x_0 + 1/2) \rvert$, with $x_0$ some particular site].
 # > At each discrete time step the particle attempts to move
 # > left, right, or stay put with equal probability. The move is accepted
 # > with the standard Metropolis acceptance probability [$= \exp(-\Delta E/T)$]. Every
@@ -18,8 +18,6 @@ using GLMakie, LinearAlgebra, ProgressMeter, Distributions
 
 box_size = 32
 time_between_shifts = 8
-
-## +0.5 because x0 is inbetween sites
 x0(t) = mod1(div(t,time_between_shifts),box_size)
 nothing#hide
 
@@ -69,12 +67,12 @@ nothing#hide
 function take_samples(f;n_burn = 10_000,n_sample = 1_000_000)
   ## Burn in
   for j = 1:n_burn
-    f(false) ## Flag that this is the burn in period; don't take stats
+    f(false) # Flag that this is the burn in period; don't take stats
   end
 
   ## Sample
   for j = 1:n_sample
-    f(true) ## Flag that statistics should be taken
+    f(true) # Flag that statistics should be taken
   end
 end
 nothing#hide
@@ -133,8 +131,7 @@ scatter!(ax,in_frame(p_eq),color = :white, strokewidth = 3,strokecolor = :black)
 
 ## Rescale energy to fit in plot
 plot!(ax,0.1/15 * in_frame(initial_energy_surface),marker = '-',color = :black,markersize = 25)
-
-f
+f#hide
 
 # The non-equilibrium steady state (black dots) resembles a fluid sloshing to the side
 # as its container (dashes) is moved at a fixed speed to the right.
@@ -143,18 +140,41 @@ f
 # Imagine that the system starts from equilibrium (non-moving), and that the motion is
 # suddenly turned on.
 # We can measure the time course of the evolution from equilibrium to the transient
-# to the final non-equilibrium steady state by burning in to the equilibrium state,
-# and only then turning on the movement of the energy surface.
+# to the final non-equilibrium steady state by simulating the process a large number of
+# times.
 
-n_sample = 2048
-hist_resolved = zeros(Int64,32,n_sample)
-
+## Statistically large number of Monte Carlo simulations
 n_trial = 10_000
+nothing#hide
 
-## Additional statitics for later
-t_save = [128,256,512,1024,2048]
+# On each trial, we make a fixed number of Metropolis steps, and record
+# the probability of arriving at position $x$ from equilibrium after time $t$ of
+# having the driving applied. 
+# In this way, we are effectively simulating a system with Langevin dynamics
+# rather than sampling an equilibrium distribution using a Monte Carlo sampler.
+
+## Characteristic time-scale of the system: how long does
+## the energy surface take to return to its original position?
+cycle_length = box_size * time_between_shifts
+
+## Length of each Monte Carlo simulation
+n_sample = 8 * cycle_length
+
+## Histogram storing P(x,t)
+hist_resolved = zeros(Int64,box_size,n_sample)
+nothing#hide
+
+# Doing this also allows us to record some additional statistics (for later)
+# because we can resolve which energy changes are due to work by the energy
+# surface, and which are due to heat from the heat bath, on a timestep-by-timestep
+# basis.
+
+t_save = Int64.(cycle_length .* [1/2,1,2,4,8])
 works_experienced = zeros(Int64,n_trial,length(t_save))
 heats_experienced = zeros(Int64,n_trial,length(t_save))
+nothing#hide
+
+# Now we are ready to take the data.
 
 prog = Progress(n_trial)#hide
 for trial = 1:n_trial
@@ -165,6 +185,7 @@ for trial = 1:n_trial
   total_W = 0
   total_Q = 0
 
+  ## Only need a very small n_burn because x ~ equilibrium
   take_samples(;n_burn = 10,n_sample) do take_stats
     ## Account for work of energy surface at current state
     ## *before* applying heat (see Crooks 1998 eqns 5,6,7)
@@ -174,6 +195,7 @@ for trial = 1:n_trial
     x, Q = make_step(x,t)
 
     if take_stats
+      ## Record position in frame of energy surface
       hist_resolved[mod1(x - x0(t),box_size),1 + t] += 1
 
       ## Only enable time evolution after burn in
@@ -181,6 +203,7 @@ for trial = 1:n_trial
       total_W += W
       total_Q += Q
 
+      ## Save out work and heat at specified times
       ix = findfirst(x -> x == t,t_save)
       if !isnothing(ix)
         works_experienced[trial,ix] = total_W
@@ -192,13 +215,15 @@ for trial = 1:n_trial
 end
 finish!(prog)#hide
 
-heatmap(1:32,0:200,hist_resolved[Ix,1:201], axis = (;title = "Evolution to steady state", ylabel = "Time", xlabel = "x", yticks = 0:8:200,xticks = 4:4:32),interpolate=true)
+heatmap(1:box_size,0:200,hist_resolved[Ix,1:201],interpolate = true
+        ,axis = (;title = "Evolution to steady state"
+                ,ylabel = "Time"
+                ,xlabel = "x"
+                ,yticks = 0:time_between_shifts:200,xticks = 4:4:box_size))
 
 # The horizontal banding is due to the discrete movement of the energy surface every eight
 # timesteps.
 # We can see the same effect in the movie:
-
-p_of_t = Observable(Float64.(hist_resolved[:,1]))
 
 f_anim = Figure()
 ax = Axis(f_anim[1,1])
@@ -212,17 +237,21 @@ lines!(ax,in_frame(p_eq),color = :black)
 scatter!(ax,in_frame(p_eq),color = :white, strokewidth = 3,strokecolor = :black)
 
 ## Time-evolving distribution
+p_of_t = Observable(Float64.(hist_resolved[:,1]))
 lines!(ax, p_of_t, color = :blue, linewidth = 3)
 
 ylims!(ax,0,0.1)
 
-record(f_anim, "anim.mp4", [hist_resolved[:,i] for i = 1:n_sample]; framerate = 30) do h
-  p_of_t[] .= in_frame(h ./ n_trial)
+## Record movie
+record(f_anim, "anim.gif", 1:(n_sample÷4); framerate = 60) do n
+  p_of_t[] .= in_frame(hist_resolved[:,n] ./ n_trial)
   notify(p_of_t)
+  ax.title[] = "t = $n"
+  notify(ax.title)
 end
 nothing#hide
 
-#md # ![](anim.mp4)
+#md # ![](anim.gif)
 
 # Using the time-resolved data, we can decompose the energy changes into work (the 
 # change in energy due to moving the energy surface) and heat (all other changes of energy
@@ -233,16 +262,16 @@ nothing#hide
 # value of the change in height of the surface over the distribution of states at time $t$:
 
 timestamps = 0:1:(n_sample - 1)
-energy_surface = [energy_function(x,t) for x = 1:32,t = timestamps]
+energy_surface = [energy_function(x,t) for x = 1:box_size,t = timestamps]
 
 ## Only nonzero at t = 8n
 energy_shifts = energy_surface[:,2:end] .- energy_surface[:,1:end-1]
 
-## ∑ᵢpᵢΔEᵢ, with pᵢ taken immediately before the energy change
-typical_work_done_on_system = sum((hist_resolved ./ n_trial)[:,1:end-1] .* energy_shifts,dims = 1)[:]
+## ∑ᵢpᵢΔEᵢ, with pᵢ taken immediately before the energy surface shift
+p_before_shift = (hist_resolved ./ n_trial)[:,1:end-1]
+typical_work_done_on_system = sum(p_before_shift .* energy_shifts,dims = 1)[:]
 
 f = Figure()
-cycle_length = box_size * time_between_shifts
 ax = Axis(f[1,1]; xlabel = "Time", ylabel = "Work", xticks = 0:cycle_length:n_sample)
 
 ## Typical work at all time steps (7/8 are zero)
@@ -273,31 +302,34 @@ nothing#hide
 # respective time step.
 # All blue lines represent *only* the exchange of heat with the bath, and no external work.
 
-work_xs = zeros(Float64,3,length(ix_nonzero_work))
-work_ys = zeros(Float64,3,length(ix_nonzero_work))
-work_xs[3,:] .= NaN
-work_ys[3,:] .= NaN
+work_xs = zeros(Float64,3,length(ix_nonzero_work)); work_xs[3,:] .= NaN
+work_ys = zeros(Float64,3,length(ix_nonzero_work)); work_ys[3,:] .= NaN
 
+## Work acts at the "virtual" timestep, so no time passes
 work_xs[1,:] .= timestamps[ix_nonzero_work]
 work_xs[2,:] .= timestamps[ix_nonzero_work]
 
+## Actual timestep
 work_ys[1,:] .= typical_system_energy[ix_nonzero_work]
+## Virtual timestep
 work_ys[2,:] .= typical_system_energy[ix_nonzero_work] .+ typical_work_done_on_system[ix_nonzero_work]
 
-heat_xs = zeros(Float64,3,length(typical_heat_imported_from_bath))
-heat_ys = zeros(Float64,3,length(typical_heat_imported_from_bath))
-heat_ys[3,:] .= NaN
+heat_xs = zeros(Float64,3,length(typical_heat_imported_from_bath)); heat_xs[3,:] .= NaN
+heat_ys = zeros(Float64,3,length(typical_heat_imported_from_bath)); heat_ys[3,:] .= NaN
 
+## Heat acts as part of the Metropolis step, so time
+## goes forward during heat exchange
 heat_xs[1,:] .= timestamps[1:end-1]
 heat_xs[2,:] .= timestamps[2:end]
 
+## Connects to previous (actual or virtual) timestep
 heat_ys[1,:] .= typical_system_energy[2:end] .- typical_heat_imported_from_bath
 heat_ys[2,:] .= typical_system_energy[2:end] 
 
 f = Figure()
 ax = Axis(f[1,1]; xlabel = "Time", ylabel = "Energy", xticks = 0:cycle_length:n_sample)
 lines!(ax,work_xs[:],work_ys[:],color = :red)
-scatter!(ax,work_xs[2,:],work_ys[2,:],color = :red,marker = 'x')
 lines!(ax,heat_xs[:],heat_ys[:],color = :blue)
+scatter!(ax,work_xs[2,:],work_ys[2,:],color = :red,marker = 'x')
 xlims!(ax,0,512)
 f#hide
